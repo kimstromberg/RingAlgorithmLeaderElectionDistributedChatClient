@@ -1,0 +1,149 @@
+# Group 20
+# Robin Karlsson
+# Kim Strömberg
+
+# Will return the html for the board with the string msg in it. 
+def html(msg):
+  return '<html>\n'\
+  '<head>\n'\
+  '  <meta content="text/html; charset=utf-8" http-equiv="content-type">\n'\
+  '  <title>Blackboard GroupName</title>\n'\
+  '</head>\n'\
+  '<body>\n'\
+  '  <h4> uID='+str(mycontext["uID"])+'</h4>'\
+  '  <h4> leader='+mycontext["leader"]+"    leaderuID="+str(mycontext["leaderuID"])+'</h4>\n'\
+  '  <h2> Board Content Group 20</h2>\n'\
+  '<p>' + msg + '</p>\n'\
+  '  <br>\n'\
+  '  <h3>Submit to board<h3>\n'\
+  '  <textarea rows="10" cols="50" name="comment" form="usrform"></textarea>\n'\
+  '  <form action="" id="usrform" method="post">\n'\
+  '  <input type="submit">\n'\
+  '  </form>\n'\
+  '</body>\n'\
+  '</html>\n'\
+  
+# Whenever a vessel gets a connection, this function gets called in order to handle it.
+# The connection is either a POST, GET, LeaderElect, LeaderAnnounce
+# or a communication message between the vessels in order to update all the boards.
+def board(ip, port, sockobj, thiscommhandle, listencommhandle):
+  msgheader=sockobj.recv(1024) # Receive message,
+  if(mycontext["hasleader"]==0):
+  # Leader election that is sent: sends a message with the vessels ip and random number
+    sendMsg(getNextNode(), "LeaderElect \nIP=" + getmyip() + "\nuID=" + str(mycontext["uID"]))
+    mycontext["hasleader"]=1
+
+  # React depending on message type: HTTP GET or POST, or some other type of communication.
+  # If it is a GET message simply return the html code.
+  if msgheader.startswith( 'GET' ):
+    htmlresponse = html( mycontext["boardContent"] )
+    sockobj.send("HTTP/1.1 200 OK\r\nContent-type: text/html\r\n" + \
+    "Content-length: %i\r\n\r\n%s" % (len(htmlresponse), htmlresponse))
+    stopcomm(thiscommhandle)
+   
+  # If it is a POST message and the vessel is the leader, add the comment to its board,
+  # return the html code for the new page and then send the comment to all other vessels
+  # If the vessel is not leader, send the comment to the leader
+  elif msgheader.startswith( 'POST' ):
+    words = msgheader.split() 
+    for word in words:
+      if word.startswith( 'comment=' ):
+        comment=word[8:]
+        if mycontext["leader"]==getmyip():
+        # The leader needs to lock when he overwrites boarContent and also when he sends
+        # because messages can arrive in different order than what was sent
+          mycontext["lock"].acquire()
+          mycontext["boardContent"] = mycontext["boardContent"]+comment+" " 
+          sendToOthers(comment)
+          mycontext["lock"].release()
+        else:
+          sendMsg(mycontext["leader"], comment)
+        htmlresponse = html(mycontext["boardContent"])
+        sockobj.send("HTTP/1.1 200 OK\r\nContent-type: text/html\r\n" + \
+        "Content-length: %i\r\n\r\n%s" % (len(htmlresponse), htmlresponse))
+        stopcomm(thiscommhandle) 
+  # This is part of the leader election process, proof and explanation is submited in the Proof file
+  elif msgheader.startswith( 'LeaderElect' ):
+    words = msgheader.split() 
+    for word in words:
+      if word.startswith( 'IP=' ):
+        IP=word[3:]
+      elif word.startswith( 'uID=' ):
+        uID=word[4:]
+  # If a vessel receivs his own message it means he has the highest uID and he
+  # therefore sets himself as leader and broadcasts this to all others 
+    if(IP==getmyip()):
+      mycontext["leader"]=getmyip()
+      mycontext["leaderuID"]=mycontext["uID"]
+      sendToOthers("LeaderAnnounce \nIP=" + getmyip() + "\nuID=" + str(mycontext["uID"]))
+    elif float(uID)>mycontext["uID"] or (float(uID)==mycontext["uID"] and highestIndex(IP, getmyip())):
+      sendMsg(getNextNode(), "LeaderElect \nIP=" + IP + "\nuID=" + uID)
+  # This is an announcement from the leader that he is all the vessels dear leader
+  elif msgheader.startswith( 'LeaderAnnounce' ):
+    words = msgheader.split()
+    for word in words:
+      if word.startswith( 'IP=' ):
+        mycontext["leader"]=word[3:]
+      elif word.startswith( 'uID=' ):
+        mycontext["leaderuID"]=float(word[4:])
+  # Otherwise it's a message from the leader/a vessel to update the board
+  else:
+    # Everyone needs to lock whenever they overwrite boardContent
+    mycontext["lock"].acquire()
+    mycontext["boardContent"] = mycontext["boardContent"]+msgheader
+    if(mycontext["leader"]==getmyip()):
+      sendToOthers(msgheader)
+    mycontext["lock"].release()
+    stopcomm(thiscommhandle)
+
+# Returns the IP with the highest IP in mycontext["vessels"] in order to break symmetry
+def highestIndex(IPa, IPb):
+  return mycontext["vessels"].index(IPa)>mycontext["vessels"].index(IPb)
+
+# Returns the node after the vessel's IP, this is used in order to build a ring topology
+def getNextNode():
+  nextid=(mycontext["vessels"].index(getmyip())+1)%len(mycontext["vessels"])
+  return mycontext["vessels"][nextid]
+
+# Tries to send msg to the vessel with IP on the input port
+def sendMsg(IP, msg):
+  try:
+    conn=openconn(IP, int(callargs[0]), timeout = 10000)
+    conn.send(msg+" ")
+    conn.close()
+  except:
+    print "Connection failed to vessel: " + IP + ":" + callargs[0]
+
+# Will try to send the input string msg to all other vessels who will store this on their board
+def sendToOthers(msg):
+  myip=getmyip() 
+  for vessel in mycontext["vessels"]:
+    if(vessel!=myip):
+      sendMsg(vessel, msg)
+
+if callfunc == 'initialize':
+  mycontext["boardContent"]=" "  #the global state of the board
+  #hardcoded list of all the vessels currently connected with
+  mycontext["vessels"] = ['128.42.142.44','128.42.142.41','128.42.142.42','128.42.142.45']
+  mycontext["uID"] = randomfloat() 
+  mycontext["leader"] = ''
+  mycontext["leaderuID"]=0
+  mycontext["lock"] = getlock()
+  mycontext["hasleader"]=0
+  if len(callargs) > 1:
+    raise Exception("Too many call arguments")
+  
+  # Running remotely (assuming that we pass input argument only remotely):
+  # whenever this vessel gets a connection on its IPaddress:Clearinghouseport it'll call function board
+  elif len(callargs) == 1:
+    port = int(callargs[0])
+    ip = getmyip()
+  
+  # Running locally:
+  # whenever we get a connection on 127.0.0.1:12345 we'll call board
+  else:
+    port = 12345
+    ip = '127.0.0.1'
+  
+# Whenever a vessel gets a connection, it will call the board function to handle it
+  listencommhandle = waitforconn(ip,port,board) 
